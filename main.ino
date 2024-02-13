@@ -31,7 +31,7 @@ uint8_t	timezone	= 1;
 uint8_t dst			= 0;
 bool	print_stamp	= true;
 
-ISR (TIMER1_COMPA_vect){  			// Interrupt Service Routine
+ISR (TIMER1_COMPA_vect){  			// Interrupt Service Routine...
 	PORTD = PORTD | (1<<PD4);
 }
 
