@@ -149,7 +149,7 @@ void loop() {
 	char 	 c;
 	uint32_t stamp;
 
-	// ------------- Serial command interpreter -------------
+	// ------------- Serial command interpreter -----------
 
 	if (Serial.available() > 0) {
 		c = Serial.read();
