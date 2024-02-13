@@ -1,0 +1,15 @@
+#!/bin/bash
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+
+sudo apt-get install -y avrdude python3-dev python3-rpi.gpio minicom
+
+echo "install avrdude autoreset"
+
+sudo ln -sf $DIR/autoreset /usr/bin/autoreset
+
+if [ ! -f /usr/bin/avrdude-original ]; then 
+	sudo mv /usr/bin/avrdude /usr/bin/avrdude-original
+fi
+
+sudo ln -sf $DIR/avrdude-autoreset /usr/bin/avrdude

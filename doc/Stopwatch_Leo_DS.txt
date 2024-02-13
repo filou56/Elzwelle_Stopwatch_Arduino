@@ -1,0 +1,289 @@
+// ****************** Stopwatch on Leonardo Arduino & DS3231 ********************
+
+#include "util.h"
+#include <util/atomic.h>
+#include <Wire.h>
+#include <I2C_RTC.h>
+
+static DS3231 RTC;
+
+#define TZ_OFFSET (3600*2)
+
+#define OLED
+
+#ifdef OLED
+#include <U8g2lib.h>
+
+// U8G2_SH1106_128X64_NONAME_1_HW_I2C 	// Single Buffer
+// U8G2_SH1106_128X64_NONAME_F_HW_I2C 	// Full Buffer
+
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+
+#endif
+
+volatile uint16_t zeroCounts;
+volatile uint16_t timerCounts;
+volatile uint16_t captureCounts;
+
+volatile boolean  zeroCaptureInterrupt;
+volatile boolean  zeroChangeInterrupt;
+
+volatile uint8_t stopwatchCentis;
+volatile uint8_t stopwatchSeconds;
+volatile uint8_t stopwatchMinutes;
+volatile uint8_t stopwatchHours;
+
+//volatile int16_t  phaseCounts;
+//volatile boolean  phaseChangeInterrupt;
+
+#define HZ_PIN			11
+
+#define TRIG_PIN		7						// PE6
+#define TRIG_TOGGLE()  	PORTE ^= 0b01000000;
+#define TRIG_SET()  	PORTE |= 0b01000000;
+#define TRIG_CLR()  	PORTE &= 0b10111111;
+
+int8_t agingOffset;
+
+uint8_t clock2bcd(uint8_t val) {
+	return val + 6 * (val / 10);
+}
+
+uint16_t word2bcd( uint16_t binary ) {
+	uint16_t bcd   = 0;
+	uint16_t shift = 0;
+
+	while (binary  > 0) {
+		bcd  |= (binary  % 10) << (shift++ << 2);
+		binary  /= 10;
+	}
+	return bcd;
+}
+
+#define bcd2ah(val) ( (val >> 4)   | 0x30 )
+#define bcd2al(val)	( (val & 0x0F) | 0x30 )
+
+void getTimestring(TIME_STAMP stamp) {
+	static uint8_t hours,minutes,seconds,centis;
+
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+		hours   = stopwatchHours;
+		minutes = stopwatchMinutes;
+		seconds = stopwatchSeconds;
+		stopwatchCentis = TCNT1;
+		if ( stopwatchCentis > 99 ) stopwatchCentis = 99; // overflow handled in ISR
+	}
+
+	stamp[0]  = bcd2ah(clock2bcd(hours));
+	stamp[1]  = bcd2al(clock2bcd(hours));
+	stamp[2]  = ':';
+
+	stamp[3]  = bcd2ah(clock2bcd(minutes));
+	stamp[4]  = bcd2al(clock2bcd(minutes));
+	stamp[5]  = ':';
+
+	stamp[6]  = bcd2ah(clock2bcd(seconds));
+	stamp[7]  = bcd2al(clock2bcd(seconds));
+	stamp[8]  = ',';
+
+	centis    = word2bcd(stopwatchCentis) & 0x00FF;
+	stamp[9]  = bcd2ah(centis);
+	stamp[10] = bcd2al(centis);
+	stamp[11] = 0;
+}
+
+void clearClock() {
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+		stopwatchCentis		= 0;
+		stopwatchSeconds	= 0;
+		stopwatchMinutes	= 0;
+		stopwatchHours		= 0;
+	}
+}
+
+// -------------------------------------------------------------
+
+// -------------------------------------------------------------
+void setup () {
+	// while (!Serial) {}		// Warte auf USB Enum
+	Serial.begin(115200);
+	Serial.println("Start");
+
+	Serial1.begin(115200);
+	Serial1.println("Start");
+
+	pinMode(TRIG_PIN,OUTPUT);
+	pinMode(12,INPUT);
+	pinMode(5,OUTPUT);
+	pinMode(HZ_PIN,INPUT);
+
+	// disable global interrupts
+	cli();
+
+	GTCCR = bit (PSRASY);     	// reset prescaler now
+
+	TCCR1A = 0;					// reset Timer 1
+	TCCR1B = 0;
+
+	// Prescaler / 256 = 62500 Hz
+	// TCCR1B = bit(CS12);
+	// 1KHz von Timer 3 count on falling Edge
+	TCCR1B = bit(CS11) | bit(CS12);
+	TCNT1  = 0;
+	ICR1   = 0;
+	OCR1A  = 0;
+	OCR1B  = 0;
+	OCR1C  = 0;
+//	TIFR1  = bit(ICF1);			// Capture Interrupt
+//	TIMSK1 = bit(ICIE1);
+
+	TCCR3A = 0;
+	TCCR3A |= bit(COM3A0);		// Output Toggle
+	TCCR3B = 0;
+	// set up timer 3 with prescaler = 64 and CTC mode
+	TCCR3B |= bit(WGM32) | bit(CS31) | bit(CS30);
+	// initialize counter
+	TCNT3 = 0;
+	// initialize compare value
+	OCR3A = 1249;				// 5ms => 10ms/1kHz Squarewave
+
+	// Pinchange Int7 on PB7 / Digital 11
+	PCMSK0 |= bit(7);
+//	// Pinchange Int5 on PB5 / Digital 9
+//	PCMSK0 |= bit(5);
+	PCICR  |= bit(0);
+
+	// enable global interrupts
+	sei();
+
+	RTC.begin();
+	RTC.setHourMode(CLOCK_H24);
+ 	RTC.enableSqwePin();
+	agingOffset = RTC.getAgingOffset();
+	RTC.setEpoch(1680115405+TZ_OFFSET);
+
+//	clearClock();
+#ifdef OLED
+	// -------------------- OLED --------------------
+	u8g2.begin();
+#endif
+
+} // end of setup
+
+ISR(PCINT0_vect) {
+	static uint8_t pcint = 0;
+
+	uint8_t pins = PINB;
+
+	// --------- PCINT 7 --------
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+		if ((pins ^ pcint) & 0b10000000) {
+			if ((pins & 0b10000000) == 0) {
+				TRIG_SET();
+				zeroCounts = TCNT1;
+				if ( zeroCounts & 0x0001 ) TCCR3C = 0x80;	// adjust edges force compare
+				TCNT3 = 0;									// clear counters
+				TCNT1 = 0;
+				if (++stopwatchSeconds > 59) {				// increment seconds....
+					stopwatchSeconds = 0;
+					if (++stopwatchMinutes > 59) {
+						stopwatchMinutes = 0;
+						stopwatchHours++;
+					}
+				}
+				zeroChangeInterrupt = true;
+				TRIG_CLR();
+			}
+		}
+	}
+
+	// --------- PCINT 5 --------
+//	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+//		if ((pins ^ pcint) & 0b00100000) {
+//			if ((pins & 0b00100000) == 0) {
+//				PORTB ^= 0b00010000;
+//				phaseCounts = TCNT1 << 1;
+//				phaseChangeInterrupt = true;
+//			}
+//		}
+//	}
+
+	pcint = pins;
+}
+
+ISR (TIMER1_CAPT_vect) {
+	TCNT1 = 0;
+	captureCounts = ICR1;
+	zeroCaptureInterrupt = true;
+}
+
+void displayTimestamp(char* stamp, uint8_t y) {
+//	u8g2.clearBuffer();
+	u8g2.setFont(u8g2_font_10x20_mn);
+	u8g2.drawStr(0,y,stamp);
+	u8g2.sendBuffer();
+}
+
+void loop ()  {
+	static char c;
+
+	static TIME_STAMP timestamp;
+	static TIME_STAMP zerostamp;
+
+	if ( zeroChangeInterrupt ) {
+		zeroChangeInterrupt = false;
+		getTimestring(zerostamp);
+		Serial.println(zerostamp);
+		Serial.println(zeroCounts);
+		Serial.println("--------------");
+//		getTimestring(zerostamp,16);
+//	} else {
+//		getTimestring(timestamp);
+//		Serial.println(timestamp);
+////		Serial.println(stopwatchCentis);
+//		Serial.println("--------------");
+////		displayTimestamp(timestamp,36);
+	}
+
+	delay(100);
+//	Serial1.print(RTC.getHours());
+//	Serial1.print(':');
+//	Serial1.print(RTC.getMinutes());
+//	Serial1.print(':');
+//	Serial1.print(RTC.getSeconds());
+//	Serial1.print('-');
+//	Serial1.print(RTC.getDay());
+//	Serial1.print('.');
+//	Serial1.print(RTC.getMonth());
+//	Serial1.print('.');
+//	Serial1.print(RTC.getYear());
+//	Serial1.print(' ');
+//	Serial1.print(RTC.getEpoch()-TZ_OFFSET);
+//	Serial1.println();
+//
+//	if(Serial1.available() > 0) {
+//		c = Serial1.read();
+//		switch (c) {
+//		case 'u':
+//			agingOffset += 1;
+//			if ( agingOffset > +100 )agingOffset = +100;
+//			//RTC.setAgingOffset(agingOffset);
+//			break;
+//		case 'd':
+//			agingOffset -= 1;
+//			if ( agingOffset < -100 )agingOffset = -100;
+//			//RTC.setAgingOffset(agingOffset);
+//			break;
+//		case 'c':
+//			agingOffset = 0;
+//			//RTC.setAgingOffset(agingOffset);
+//			break;
+//		case 'r':
+//			Serial1.println("Reset");
+//			clearClock();
+//			break;
+//		}
+//	}
+
+}
+

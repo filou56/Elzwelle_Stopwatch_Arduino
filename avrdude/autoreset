@@ -1,0 +1,40 @@
+#!/usr/bin/python3
+
+import sys
+import time
+import signal
+import RPi.GPIO as GPIO
+
+DTR = 'TIOCM_DTR'
+PIN = 12
+PULSE_TIME = 0.08
+MAX_TIME = 5000
+
+if 'pi2' in sys.argv:
+  PIN = 12
+
+def reset():
+    time.sleep(0.1)
+    GPIO.setup(PIN, GPIO.OUT)
+    GPIO.output(PIN, GPIO.HIGH)
+    time.sleep(PULSE_TIME)
+    GPIO.output(PIN, GPIO.LOW)
+
+def process():
+    while True:
+        text = sys.stdin.readline()
+        if not text:
+            return
+        if DTR in text:
+#            print("avrdude-original: Using autoreset DTR on GPIO Pin", PIN)
+            reset()
+
+def main():
+    signal.alarm(MAX_TIME)
+    GPIO.setwarnings(False)  # FIXME why disable warnings? This seems unwise!
+    GPIO.setmode(GPIO.BOARD)
+    process()
+    GPIO.cleanup()
+
+if __name__ == '__main__':
+    main()

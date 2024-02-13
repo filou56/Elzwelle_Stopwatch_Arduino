@@ -1,0 +1,20 @@
+#!/bin/bash
+
+# Check if the -pi2 flag is present in the command-line arguments
+found_pi2=false
+
+# Loop through all command-line arguments
+for arg in "$@"; do
+  if [ "$arg" = "-pi2" ]; then
+    found_pi2=true
+    break
+  fi
+done
+
+# If the -pi2 flag is found, remove it from the command line
+if [ "$found_pi2" = true ]; then
+  set -- "${@/#-pi2}"
+  sudo strace -o "|autoreset pi2" -eioctl /usr/bin/avrdude-original $@
+else
+  sudo strace -o "|autoreset" -eioctl /usr/bin/avrdude-original $@
+fi
